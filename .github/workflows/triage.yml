@@ -58,8 +58,13 @@ jobs:
           Read the issue title and body and decide:
           - category: one of "URGENT", "FEATURE_REQUEST", or "QUESTION"
           - priority: one of "HIGH", "MEDIUM", or "LOW"
-          - labels: an array of GitHub label names (strings)
+          - labels: an array of GitHub label names
           - response: a short, friendly Markdown comment for the issue author.
+
+          IMPORTANT:
+          - "labels" MUST ONLY contain labels from this list:
+            ["question", "bug", "feature-request", "enhancement", "urgent"]
+          - Do NOT invent new label names outside of that list.
 
           Return ONLY a single JSON object, with no backticks, code fences, or extra text.
           Use this schema exactly:
@@ -92,7 +97,6 @@ jobs:
 
           issue_number = sys.argv[1]
 
-          # Read goose output and extract the first JSON object
           text = open("goose_output.txt", "r", encoding="utf-8").read()
           match = re.search(r'\{.*\}', text, re.S)
           if not match:
@@ -102,30 +106,55 @@ jobs:
 
           data = json.loads(match.group(0))
 
-          labels = data.get("labels", [])
-          priority = data.get("priority", "MEDIUM").lower()
-          response = data.get("response", "")
+          raw_labels = data.get("labels", []) or []
+          priority = data.get("priority", "MEDIUM").upper()
+          response = data.get("response", "").strip()
 
-          # Apply labels
+          # Only allow labels from this controlled set
+          allowed_labels = {
+              "question",
+              "bug",
+              "feature-request",
+              "enhancement",
+              "urgent",
+          }
+          labels = [l for l in raw_labels if isinstance(l, str) and l in allowed_labels]
+
+          print(f"LLM labels (raw): {raw_labels}")
+          print(f"Filtered labels: {labels}")
+          print(f"Priority: {priority}")
+
+          # Apply labels (don't crash if one fails)
           for label in labels:
-              if label:
+              if not label:
+                  continue
+              try:
                   subprocess.run(
                       ["gh", "issue", "edit", issue_number, "--add-label", label],
                       check=True,
                   )
+              except subprocess.CalledProcessError as e:
+                  print(f"Warning: failed to add label '{label}': {e}")
 
-          # Add a priority label like priority:high / priority:medium / priority:low
-          subprocess.run(
-              ["gh", "issue", "edit", issue_number, "--add-label", f"priority:{priority}"],
-              check=True,
-          )
-
-          # Add triage comment
-          if response.strip():
+          # Add priority label like priority:high / priority:medium / priority:low
+          priority_norm = priority.lower()
+          try:
               subprocess.run(
-                  ["gh", "issue", "comment", issue_number, "--body", response],
+                  ["gh", "issue", "edit", issue_number, "--add-label", f"priority:{priority_norm}"],
                   check=True,
               )
+          except subprocess.CalledProcessError as e:
+              print(f"Warning: failed to add priority label 'priority:{priority_norm}': {e}")
+
+          # Add triage comment
+          if response:
+              try:
+                  subprocess.run(
+                      ["gh", "issue", "comment", issue_number, "--body", response],
+                      check=True,
+                  )
+              except subprocess.CalledProcessError as e:
+                  print(f"Warning: failed to add comment: {e}")
 
           print(f"Issue #{issue_number} triaged with goose.")
           PY

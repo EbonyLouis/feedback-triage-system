@@ -1,0 +1,25 @@
+#!/bin/bash
+
+# Setup script for adding the LLM API key as a GitHub secret
+
+echo "🔐 Setting up LLM API Key as GitHub Secret"
+echo ""
+echo "This script will help you add your LLM provider API key to GitHub Secrets."
+echo ""
+echo "To set the secret, run:"
+echo ""
+echo "  gh secret set LLM_API_KEY"
+echo ""
+echo "Then paste your API key when prompted."
+echo ""
+echo "Supported providers:"
+echo "  - OpenAI (OPENAI_API_KEY)"
+echo "  - Anthropic (ANTHROPIC_API_KEY)"
+echo "  - Other providers supported by goose"
+echo ""
+echo "After setting the secret, you can manually trigger the workflow or create a new issue to test."
+echo ""
+echo "To manually trigger the workflow on existing issues, you can close and reopen them:"
+echo "  gh issue close <issue-number>"
+echo "  gh issue reopen <issue-number>"
+echo ""

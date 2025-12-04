@@ -1,99 +1,131 @@
-name: Issue Triage with Goose
+name: Issue Triage with goose
 
 on:
   issues:
     types: [opened]
 
+permissions:
+  issues: write
+  contents: read
+
+env:
+  OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+  GOOSE_PROVIDER: openrouter
+  GOOSE_MODEL: anthropic/claude-sonnet-4.5
+  GH_TOKEN: ${{ github.token }}
+
 jobs:
   triage:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-
-      - name: Install goose
+      - name: Install goose CLI
         run: |
-          pip install goose-ai
+          mkdir -p /home/runner/.local/bin
+          curl -fsSL https://github.com/block/goose/releases/download/stable/download_cli.sh \
+            | CONFIGURE=false GOOSE_BIN_DIR=/home/runner/.local/bin bash
+          echo "/home/runner/.local/bin" >> $GITHUB_PATH
 
-      - name: Triage issue with goose
+      - name: Configure goose for OpenRouter
+        run: |
+          mkdir -p ~/.config/goose
+          cat << 'EOF' > ~/.config/goose/config.yaml
+          GOOSE_PROVIDER: "openrouter"
+          GOOSE_MODEL: "anthropic/claude-sonnet-4.5"
+          keyring: false
+
+          extensions:
+            developer:
+              bundled: true
+              enabled: true
+              name: developer
+              timeout: 300
+              type: builtin
+          EOF
+
+      - name: Build triage instructions for goose
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          OPENAI_API_KEY: ${{ secrets.LLM_API_KEY }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           ISSUE_TITLE: ${{ github.event.issue.title }}
           ISSUE_BODY: ${{ github.event.issue.body }}
         run: |
-          # Create a triage script
-          cat > triage.py << 'EOF'
-          import os
-          import json
-          import subprocess
+          cat > instructions.txt << EOF
+          You are an issue triage assistant for a GitHub repo.
 
-          issue_number = os.environ['ISSUE_NUMBER']
-          issue_title = os.environ['ISSUE_TITLE']
-          issue_body = os.environ['ISSUE_BODY']
+          Read the issue title and body and decide:
+          - category: one of "URGENT", "FEATURE_REQUEST", or "QUESTION"
+          - priority: one of "HIGH", "MEDIUM", or "LOW"
+          - labels: an array of GitHub label names (strings)
+          - response: a short, friendly Markdown comment for the issue author.
 
-          # Analyze the issue and categorize it
-          prompt = f"""
-          Analyze this issue and categorize it:
-          
-          Title: {issue_title}
-          Body: {issue_body}
-          
-          Categorize as one of: URGENT, FEATURE_REQUEST, QUESTION
-          Provide a priority (HIGH, MEDIUM, LOW)
-          Suggest appropriate labels
-          Write a brief triage response
-          
-          Format your response as JSON with keys: category, priority, labels (array), response
-          """
-          
-          # Determine category based on keywords
-          category = "QUESTION"
-          priority = "MEDIUM"
-          labels = []
-          
-          title_lower = issue_title.lower()
-          body_lower = issue_body.lower()
-          
-          if any(word in title_lower or word in body_lower for word in ['urgent', 'asap', 'emergency', 'not working', 'broken', 'stopped']):
-              category = "URGENT"
-              priority = "HIGH"
-              labels = ["urgent", "bug"]
-          elif any(word in title_lower or word in body_lower for word in ['add', 'feature', 'request', 'could we', 'suggestion']):
-              category = "FEATURE_REQUEST"
-              priority = "MEDIUM"
-              labels = ["enhancement", "feature-request"]
-          elif any(word in title_lower or word in body_lower for word in ['where', 'how', 'question', 'asked']):
-              category = "QUESTION"
-              priority = "MEDIUM"
-              labels = ["question"]
-          
-          # Generate response based on category
-          if category == "URGENT":
-              response = f"🚨 **URGENT ISSUE DETECTED**\\n\\nThis issue has been automatically categorized as urgent and requires immediate attention.\\n\\n**Priority:** {priority}\\n**Category:** {category}\\n\\nThe team has been notified and will address this as soon as possible."
-          elif category == "FEATURE_REQUEST":
-              response = f"💡 **FEATURE REQUEST**\\n\\nThank you for your suggestion! This has been categorized as a feature request.\\n\\n**Priority:** {priority}\\n**Category:** {category}\\n\\nWe'll review this and consider it for future improvements."
-          else:
-              response = f"❓ **QUESTION**\\n\\nThank you for your question! This has been categorized appropriately.\\n\\n**Priority:** {priority}\\n**Category:** {category}\\n\\nSomeone from the team will respond with the information you need."
-          
-          # Add labels to the issue
-          for label in labels:
-              subprocess.run(['gh', 'issue', 'edit', issue_number, '--add-label', label], check=True)
-          
-          # Add priority label
-          subprocess.run(['gh', 'issue', 'edit', issue_number, '--add-label', f'priority:{priority.lower()}'], check=True)
-          
-          # Add comment with triage response
-          subprocess.run(['gh', 'issue', 'comment', issue_number, '--body', response], check=True)
-          
-          print(f"✅ Issue #{issue_number} triaged successfully!")
-          print(f"Category: {category}, Priority: {priority}, Labels: {labels}")
+          Return ONLY a single JSON object, with no backticks, code fences, or extra text.
+          Use this schema exactly:
+          {
+            "category": "string",
+            "priority": "string",
+            "labels": ["string"],
+            "response": "string"
+          }
+
+          Title:
+          ${ISSUE_TITLE}
+
+          Body:
+          ${ISSUE_BODY}
           EOF
-          
-          python triage.py
+
+      - name: Run goose triage
+        run: |
+          goose run --no-session -i instructions.txt \
+            | sed -E 's/\x1B\[[0-9;]*[mK]//g' \
+            > goose_output.txt
+
+      - name: Apply labels and comment from goose output
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          python - "$ISSUE_NUMBER" << 'PY'
+          import json, os, re, subprocess, sys
+
+          issue_number = sys.argv[1]
+
+          # Read goose output and extract the first JSON object
+          text = open("goose_output.txt", "r", encoding="utf-8").read()
+          match = re.search(r'\{.*\}', text, re.S)
+          if not match:
+              print("No JSON found in goose output:")
+              print(text)
+              raise SystemExit(1)
+
+          data = json.loads(match.group(0))
+
+          labels = data.get("labels", [])
+          priority = data.get("priority", "MEDIUM").lower()
+          response = data.get("response", "")
+
+          # Apply labels
+          for label in labels:
+              if label:
+                  subprocess.run(
+                      ["gh", "issue", "edit", issue_number, "--add-label", label],
+                      check=True,
+                  )
+
+          # Add a priority label like priority:high / priority:medium / priority:low
+          subprocess.run(
+              ["gh", "issue", "edit", issue_number, "--add-label", f"priority:{priority}"],
+              check=True,
+          )
+
+          # Add triage comment
+          if response.strip():
+              subprocess.run(
+                  ["gh", "issue", "comment", issue_number, "--body", response],
+                  check=True,
+              )
+
+          print(f"Issue #{issue_number} triaged with goose.")
+          PY

@@ -2,7 +2,7 @@ name: Issue Triage with goose
 
 on:
   issues:
-    types: [opened]
+    types: [opened, reopened]
 
 permissions:
   issues: write

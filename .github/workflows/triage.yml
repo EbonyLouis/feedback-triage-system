@@ -53,24 +53,35 @@ jobs:
           ISSUE_BODY: ${{ github.event.issue.body }}
         run: |
           cat > instructions.txt << EOF
-          You are an issue triage assistant for a GitHub repo.
+          You are an issue triage assistant for a Winter Festival feedback tracker.
 
           Read the issue title and body and decide:
-          - category: one of "URGENT", "FEATURE_REQUEST", or "QUESTION"
+          - category: one of "URGENT", "SUGGESTION", "QUESTION", "COMPLAINT", or "PRAISE"
           - priority: one of "HIGH", "MEDIUM", or "LOW"
+          - sentiment: one of "positive", "negative", or "neutral"
           - labels: an array of GitHub label names
           - response: a short, friendly Markdown comment for the issue author.
 
           IMPORTANT:
           - "labels" MUST ONLY contain labels from this list:
-            ["question", "bug", "feature-request", "enhancement", "urgent"]
+            ["urgent", "question", "suggestion", "complaint", "praise"]
           - Do NOT invent new label names outside of that list.
+          - Use "urgent" for safety / time-sensitive operational issues
+          - Use "question" for people asking where/when/how
+          - Use "suggestion" for new ideas / nice-to-have features
+          - Use "complaint" for negative feedback that isn't an immediate safety risk
+          - Use "praise" for positive feedback / compliments
+          - sentiment:
+              * "positive" for praise or happy tone
+              * "negative" for complaints, broken things, or upset tone
+              * "neutral" for straightforward questions or factual reports
 
           Return ONLY a single JSON object, with no backticks, code fences, or extra text.
           Use this schema exactly:
           {
             "category": "string",
             "priority": "string",
+            "sentiment": "string",
             "labels": ["string"],
             "response": "string"
           }
@@ -93,7 +104,7 @@ jobs:
           ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: |
           python - "$ISSUE_NUMBER" << 'PY'
-          import json, os, re, subprocess, sys
+          import json, re, subprocess, sys
 
           issue_number = sys.argv[1]
 
@@ -107,24 +118,66 @@ jobs:
           data = json.loads(match.group(0))
 
           raw_labels = data.get("labels", []) or []
-          priority = data.get("priority", "MEDIUM").upper()
-          response = data.get("response", "").strip()
+          priority = (data.get("priority") or "MEDIUM").upper()
+          sentiment = (data.get("sentiment") or "neutral").lower()
+          response = (data.get("response") or "").strip()
 
           # Only allow labels from this controlled set
           allowed_labels = {
-              "question",
-              "bug",
-              "feature-request",
-              "enhancement",
               "urgent",
+              "question",
+              "suggestion",
+              "complaint",
+              "praise",
           }
           labels = [l for l in raw_labels if isinstance(l, str) and l in allowed_labels]
+
+          priority_label = f"priority:{priority.lower()}"
+          sentiment_label = f"sentiment:{sentiment}"
 
           print(f"LLM labels (raw): {raw_labels}")
           print(f"Filtered labels: {labels}")
           print(f"Priority: {priority}")
+          print(f"Sentiment: {sentiment}")
 
-          # Apply labels (don't crash if one fails)
+          # Helper: check + create label if needed
+          def ensure_label_exists(label, color="ededed"):
+              try:
+                  check = subprocess.run(
+                      ["gh", "label", "view", label],
+                      stdout=subprocess.PIPE,
+                      stderr=subprocess.PIPE,
+                  )
+                  if check.returncode != 0:
+                      print(f"Label '{label}' not found — creating it.")
+                      subprocess.run(
+                          ["gh", "label", "create", label, "--color", color],
+                          check=True
+                      )
+              except Exception as e:
+                  print(f"Warning: Could not create label '{label}': {e}")
+
+          # Optional: color map for labels
+          label_colors = {
+              "urgent": "d73a4a",              # red
+              "question": "0e8a16",            # green
+              "suggestion": "0366d6",          # blue
+              "complaint": "d876e3",           # purple
+              "praise": "f9d0c4",              # peach
+              "priority:high": "b60205",
+              "priority:medium": "f9d0c4",
+              "priority:low": "c0e1ff",
+              "sentiment:positive": "0e8a16",
+              "sentiment:neutral": "c5c5c5",
+              "sentiment:negative": "d73a4a",
+          }
+
+          # Ensure all needed labels exist
+          all_needed = labels + [priority_label, sentiment_label]
+          for label in all_needed:
+              ensure_label_exists(label, label_colors.get(label, "ededed"))
+
+          # Apply festival labels
           for label in labels:
               if not label:
                   continue
@@ -136,15 +189,23 @@ jobs:
               except subprocess.CalledProcessError as e:
                   print(f"Warning: failed to add label '{label}': {e}")
 
-          # Add priority label like priority:high / priority:medium / priority:low
-          priority_norm = priority.lower()
+          # Add priority label
           try:
               subprocess.run(
-                  ["gh", "issue", "edit", issue_number, "--add-label", f"priority:{priority_norm}"],
+                  ["gh", "issue", "edit", issue_number, "--add-label", priority_label],
                   check=True,
               )
           except subprocess.CalledProcessError as e:
-              print(f"Warning: failed to add priority label 'priority:{priority_norm}': {e}")
+              print(f"Warning: failed to add priority label '{priority_label}': {e}")
+
+          # Add sentiment label
+          try:
+              subprocess.run(
+                  ["gh", "issue", "edit", issue_number, "--add-label", sentiment_label],
+                  check=True,
+              )
+          except subprocess.CalledProcessError as e:
+              print(f"Warning: failed to add sentiment label '{sentiment_label}': {e}")
 
           # Add triage comment
           if response:
